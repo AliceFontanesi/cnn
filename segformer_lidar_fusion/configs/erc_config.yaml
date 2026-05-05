@@ -1,0 +1,122 @@
+# SegFormer-B0 + LiDAR Fusion — ERC Configuration
+# European Rover Challenge — Martian terrain semantic segmentation
+# Target hardware: NVIDIA Jetson Orin Nano (8 GB)
+
+# -------------------------------------------------------------------
+# Model
+# -------------------------------------------------------------------
+model:
+  num_classes: 7
+  cam_channels: 3          # RGB input
+  lidar_channels: 2        # Height map + intensity
+  embed_dim: 256            # Decode head unified dim
+  dropout: 0.1
+
+# -------------------------------------------------------------------
+# Terrain classes
+# -------------------------------------------------------------------
+classes:
+  - name: background
+    id: 0
+    color: [0, 0, 0]
+  - name: traversable_soil
+    id: 1
+    color: [194, 178, 128]
+  - name: bedrock
+    id: 2
+    color: [128, 128, 128]
+  - name: small_rock
+    id: 3
+    color: [255, 165, 0]
+  - name: large_boulder
+    id: 4
+    color: [255, 0, 0]
+  - name: slope
+    id: 5
+    color: [255, 255, 0]
+  - name: shadow
+    id: 6
+    color: [64, 0, 128]
+
+# -------------------------------------------------------------------
+# Data
+# -------------------------------------------------------------------
+data:
+  image_size: [512, 512]
+  train_dir: data/train
+  val_dir: data/val
+  test_dir: data/test
+  batch_size: 8
+  num_workers: 4
+  # ImageNet-style normalization for camera images
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  # LiDAR normalization (dataset-specific; update after data collection)
+  lidar_mean: [0.0, 0.0]
+  lidar_std: [1.0, 1.0]
+  # Augmentation
+  augmentation:
+    random_flip: true
+    random_scale: [0.5, 2.0]
+    random_crop: [512, 512]
+    color_jitter:
+      brightness: 0.3
+      contrast: 0.3
+      saturation: 0.2
+      hue: 0.05
+    random_rotation: 10  # degrees
+
+# -------------------------------------------------------------------
+# Training
+# -------------------------------------------------------------------
+training:
+  epochs: 160
+  optimizer:
+    type: AdamW
+    lr: 6.0e-5
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+  scheduler:
+    type: polynomial
+    power: 1.0             # linear decay
+    min_lr: 0.0
+    warmup_epochs: 5
+  # Class weights (inverse frequency — update after data analysis)
+  class_weights: [0.5, 1.0, 1.2, 2.0, 2.5, 1.8, 1.5]
+  ignore_index: 255
+  mixed_precision: true
+  gradient_clip: 1.0
+  log_interval: 50
+  val_interval: 5
+  checkpoint_dir: checkpoints/
+
+# -------------------------------------------------------------------
+# Deployment — Jetson Orin Nano
+# -------------------------------------------------------------------
+deploy:
+  onnx:
+    opset_version: 17
+    dynamic_axes: false
+    input_shape: [1, 3, 512, 512]
+    lidar_shape: [1, 2, 512, 512]
+  tensorrt:
+    precision: int8          # fp16 | int8
+    workspace_mb: 1024
+    calibration_batches: 100
+    calibration_cache: deploy/calibration.cache
+  target:
+    device: orin_nano
+    jetpack: "6.0"
+    cuda: "12.2"
+    tensorrt: "8.6"
+
+# -------------------------------------------------------------------
+# ROS 2 integration
+# -------------------------------------------------------------------
+ros2:
+  camera_topic: /rover/camera/image_raw
+  lidar_topic: /rover/lidar/points
+  output_topic: /rover/segmentation/costmap
+  frame_id: base_link
+  publish_rate: 30           # Hz (capped by inference speed)
+  visualization: true
