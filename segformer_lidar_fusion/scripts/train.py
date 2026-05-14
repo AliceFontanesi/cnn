@@ -50,7 +50,10 @@ def build_scheduler(
 def train(config_path: str) -> None:
     cfg = load_config(config_path)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda" if use_cuda else "cpu")
+    if not use_cuda:
+        print("CUDA not available — training on CPU (this is normal without an NVIDIA GPU)")
 
     # Model
     model = SegFormerLiDAR(
@@ -86,7 +89,7 @@ def train(config_path: str) -> None:
         batch_size=data_cfg["batch_size"],
         shuffle=True,
         num_workers=data_cfg["num_workers"],
-        pin_memory=True,
+        pin_memory=use_cuda,
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -94,7 +97,7 @@ def train(config_path: str) -> None:
         batch_size=1,
         shuffle=False,
         num_workers=data_cfg["num_workers"],
-        pin_memory=True,
+        pin_memory=use_cuda,
     )
 
     # Optimiser
@@ -114,7 +117,8 @@ def train(config_path: str) -> None:
     ).to(device)
     ignore_index = cfg["training"]["ignore_index"]
 
-    scaler = torch.amp.GradScaler("cuda", enabled=cfg["training"]["mixed_precision"])
+    use_amp = cfg["training"]["mixed_precision"] and use_cuda
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     grad_clip = cfg["training"]["gradient_clip"]
 
     ckpt_dir = Path(cfg["training"]["checkpoint_dir"])
@@ -135,7 +139,7 @@ def train(config_path: str) -> None:
             mask = batch["mask"].to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", enabled=cfg["training"]["mixed_precision"]):
+            with torch.amp.autocast("cuda", enabled=use_amp):
                 out = model.compute_loss(
                     image, lidar, mask,
                     class_weights=class_weights,
