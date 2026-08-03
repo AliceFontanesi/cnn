@@ -17,6 +17,10 @@ import torch.nn as nn
 import yaml
 from torch.utils.data import DataLoader
 
+# Training script for SegFormer-LiDAR.
+# It loads configuration from YAML, builds the datasets and model, and runs
+# training/validation loops with checkpointing.
+
 from segformer_lidar_fusion.data import ERCDataset
 from segformer_lidar_fusion.models import SegFormerLiDAR
 from segformer_lidar_fusion.utils.metrics import compute_miou
@@ -39,6 +43,7 @@ def build_scheduler(
     base_lr = cfg["training"]["optimizer"]["lr"]
 
     def lr_lambda(step: int) -> float:
+        # Linear warmup followed by polynomial decay.
         if step < warmup_steps:
             return step / max(warmup_steps, 1)
         progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
@@ -112,6 +117,7 @@ def train(config_path: str) -> None:
     steps_per_epoch = max(len(train_loader), 1)
     scheduler = build_scheduler(optimizer, cfg, steps_per_epoch)
 
+    # Convert class weights to a tensor for the loss computation.
     class_weights = torch.tensor(
         cfg["training"]["class_weights"], dtype=torch.float32,
     ).to(device)
@@ -128,7 +134,7 @@ def train(config_path: str) -> None:
     epochs = cfg["training"]["epochs"]
 
     for epoch in range(1, epochs + 1):
-        # --- Train ---
+        # --- Training epoch ---
         model.train()
         epoch_loss = 0.0
         t0 = time.time()
@@ -167,7 +173,7 @@ def train(config_path: str) -> None:
         elapsed = time.time() - t0
         print(f"Epoch {epoch} — avg_loss={avg_loss:.4f}  time={elapsed:.1f}s")
 
-        # --- Validate ---
+        # --- Validation ---
         if epoch % cfg["training"]["val_interval"] == 0:
             model.eval()
             total_miou = 0.0

@@ -1,0 +1,60 @@
+# 3-class ERC config (blue/green/red palette)
+model:
+  num_classes: 3
+  cam_channels: 3
+  lidar_channels: 2
+  embed_dim: 256
+  dropout: 0.1
+
+classes:
+  - name: background
+    id: 0
+    color: [0, 0, 255]
+  - name: traversable_soil
+    id: 1
+    color: [0, 255, 0]
+  - name: bedrock
+    id: 2
+    color: [255, 0, 0]
+
+data:
+  image_size: [512, 512]
+  train_dir: data/ai4mars_hf_dummy/train
+  val_dir: data/ai4mars_hf_dummy/val
+  test_dir: data/ai4mars_hf_dummy/val
+  batch_size: 8
+  num_workers: 4
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  lidar_mean: [0.0, 0.0]
+  lidar_std: [1.0, 1.0]
+  augmentation:
+    random_flip: true
+    random_scale: [0.5, 2.0]
+    random_crop: [512, 512]
+    color_jitter:
+      brightness: 0.3
+      contrast: 0.3
+      saturation: 0.2
+      hue: 0.05
+    random_rotation: 10
+
+training:
+  epochs: 50
+  optimizer:
+    type: AdamW
+    lr: 6.0e-05
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+  scheduler:
+    type: polynomial
+    power: 1.0
+    min_lr: 0.0
+    warmup_epochs: 5
+  class_weights: [1.0, 1.0, 1.0]
+  ignore_index: 255
+  mixed_precision: true
+  gradient_clip: 1.0
+  log_interval: 50
+  val_interval: 5
+  checkpoint_dir: checkpoints/erc_3class/

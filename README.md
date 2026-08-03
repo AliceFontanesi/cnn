@@ -1,160 +1,321 @@
 # SegFormer-B0 + LiDAR Fusion — ERC Terrain Segmentation
 
-Real-time semantic segmentation of Martian terrain for the **European Rover Challenge (ERC)**, optimised for deployment on the **NVIDIA Jetson Orin Nano**.
+Questo repository è un prototipo di pipeline per la segmentazione semantica del terreno marziano usando un modello SegFormer che fonde immagini RGB e dati LiDAR.
 
-## Architecture
+Il focus attuale è sull’uso del dataset AI4MARS e sulla riduzione della tassonomia originale a 3 classi operative:
+- `background`
+- `traversable_soil`
+- `bedrock`
+
+> Nota: il dataset AI4MARS non è incluso nel repository. Usa lo script `segformer_lidar_fusion/scripts/prepare_ai4mars_hf.py` per esportarlo localmente.
+
+---
+
+## 🧠 Panoramica dell’algoritmo
+
+Il modello combina due rami di feature extraction:
+- un backbone `MiT-B0` per l’elaborazione delle immagini RGB,
+- un encoder convoluzionale per l’elaborazione delle mappe LiDAR height/intensity.
+
+Le feature vengono quindi fuse con un modulo di attenzione multi-scala e passate a una testa decoder in stile SegFormer.
+
+### Schema del modello
 
 ```
-Camera (RGB) ──► MiT-B0 Encoder ──┐
-                                   ├── Cross-Attention Fusion ──► All-MLP Decoder ──► Semantic Mask
-LiDAR (H+I)  ──► Conv Encoder  ──┘
+RGB Image -> [MiT-B0 Encoder] ---┐
+                                 +--> [Multi-scale Fusion] --> [SegFormer Head] --> Segmentation Map
+LiDAR H/I -> [LiDAR Conv Encoder] -┘
 ```
 
-| Component | Details |
-|---|---|
-| **Camera encoder** | Mix Transformer B0 — 4 stages, embed dims [32, 64, 160, 256], efficient self-attention with spatial reduction |
-| **LiDAR encoder** | Lightweight depth-wise separable conv encoder (4 stages, channel-aligned) |
-| **Fusion** | Multi-scale gated cross-attention — camera features as query, LiDAR as key/value |
-| **Decoder** | SegFormer all-MLP head — unifies scales, concatenates, classifies |
-| **Target latency** | ~20 ms @ 512×512 on Orin Nano (INT8 TensorRT) |
+### Flusso dei dati
 
-## Terrain Classes
+```
+1) Input:
+   - immagine RGB (3 canali)
+   - mappa LiDAR (2 canali: height, intensity)
 
-| ID | Class | Colour |
-|---|---|---|
-| 0 | Background | ⬛ Black |
-| 1 | Traversable Soil | 🟫 Sand |
-| 2 | Bedrock | ⬜ Grey |
-| 3 | Small Rock | 🟧 Orange |
-| 4 | Large Boulder | 🟥 Red |
-| 5 | Slope | 🟨 Yellow |
-| 6 | Shadow | 🟪 Purple |
+2) Estrazione feature:
+   - ramo immagini -> MiT-B0
+   - ramo LiDAR -> encoder conv
 
-## Setup
+3) Fusione:
+   - feature multi-scala unite con attenzione
+
+4) Decodifica:
+   - SegFormer Head genera logits per pixel
+   - logits upsampled a risoluzione immagine
+
+5) Output:
+   - mappa semantica 3-classi (background, traversable_soil, bedrock)
+```
+
+### Componenti principali
+
+1. `MiT-B0 Encoder`
+   - Estrae rappresentazioni visive multi-scala da immagini RGB.
+   - È leggero e adatto a scenari in cui si vuole inferenza rapida.
+
+2. `LiDAR Conv Encoder`
+   - Riceve input LiDAR con due canali: height e intensity.
+   - Codifica informazioni geometriche e topografiche che non sono facilmente visibili nella sola immagine.
+
+3. `Multi-scale Fusion`
+   - Allinea e combina le feature della camera e del LiDAR a più risoluzioni.
+   - Questo aiuta il modello a disambiguare superfici simili visivamente ma differenti nella pendenza o nell’ostruzione.
+
+4. `SegFormer Head`
+   - Aggrega le feature fuse e produce logits per pixel.
+   - I logits vengono interpolati alla risoluzione originale dell’immagine.
+
+### Vantaggi del design
+
+- L’integrazione camera + LiDAR migliora la robustezza su terreno complesso.
+- Il decoder SegFormer è adatto per segmentazioni dense e multi-classe.
+- Il modello supporta un flusso end-to-end: immagine + LiDAR → mappa semantica.
+
+---
+
+## 🎯 Significato delle 3 classi
+
+La tassonomia ridotta è pensata per scenari di navigazione e per valutare il terreno con priorità operativa.
+
+| ID | Classe | Cosa rappresenta |
+|---:|---|---|
+| 0 | `background` | Zona non utile per navigazione: sky, ombre, strutture non terreno o aree non classificabili. |
+| 1 | `traversable_soil` | Terreno potenzialmente percorribile e sicuro per un rover: suolo compatto, sabbia aggredibile, pavimentazioni morbide. |
+| 2 | `bedrock` | Superfici rocciose o massicce che potrebbero ostacolare o danneggiare un rover. |
+
+### Mapping della tassonomia AI4MARS → 3 classi
+
+Per ridurre le classi originali, lo script di preparazione applica un remapping come questo:
+- `0 -> 0` background
+- `1 -> 1` traversable_soil
+- `2 -> 2` bedrock
+- `3 -> 2` bedrock
+- `4 -> 2` bedrock
+- `5 -> 1` traversable_soil
+- `6 -> 0` background
+
+Questo significa che classi originali come piccoli massi o pendenze vengono ricondotte alle categorie operative.
+
+---
+
+## 📁 Struttura del progetto
+
+### `segformer_lidar_fusion/models`
+
+- `mit.py`
+  - Implementa il backbone MiT-B0 usato come encoder visivo.
+- `lidar_encoder.py`
+  - Encoder convoluzionale per le mappe LiDAR 2-canale.
+- `fusion.py`
+  - Modulo di fusione multi-scala tra feature visive e LiDAR.
+- `segformer_head.py`
+  - Head decoder in stile SegFormer che genera logits pixel-wise.
+- `segformer_lidar.py`
+  - Classe principale che unisce camera, LiDAR, fusione e testa di output.
+
+### `segformer_lidar_fusion/data`
+
+- `erc_dataset.py`
+  - Implementa `torch.utils.data.Dataset` per coppie immagine / LiDAR / maschera.
+  - Legge immagini RGB (`.png`, `.jpg`), maschere semantiche (`.png`) e LiDAR (`.npy`).
+  - Esegue resize uniforme, normalizzazione e augmentazioni base (flip orizzontale/verticale).
+  - Tratta `255` come `ignore_index` durante il training.
+
+### `segformer_lidar_fusion/scripts`
+
+- `prepare_ai4mars_hf.py`
+  - Esporta AI4MARS da HuggingFace in una struttura locale compatibile con `ERCDataset`.
+  - Supporta il remapping delle etichette, il detection automatico delle colonne immagine/maschera e la generazione di LiDAR dummy.
+- `train.py`
+  - Script di training che carica config YAML, costruisce dataset e modello, e allena con checkpointing.
+  - Usa `AdamW`, learning rate poly decay, warmup e mixed precision quando disponibile.
+- `evaluate.py`
+  - Valuta un checkpoint su validation/test e stampa IoU per classe e mIoU.
+- `infer.py`
+  - Esegue inferenza su una singola immagine + LiDAR e salva una visualizzazione con overlay e legenda.
+- `diagnose.py`
+  - Calcola mIoU per esempio di validazione e salva i peggiori `topk` come immagini side-by-side.
+
+### `segformer_lidar_fusion/utils`
+
+- `visualization.py`
+  - Converte maschere di classe in colori e crea overlay visivi.
+- `metrics.py`
+  - Calcola IoU per classe e mean IoU.
+
+### `segformer_lidar_fusion/configs`
+
+- `erc_config_3class.yaml`
+  - Configurazione principale per il training a 3 classi con batch size, optimizer, scheduler e class weights.
+- I file YAML definiscono anche nome e colore delle classi.
+
+---
+
+## 🛠️ Workflow consigliato
+
+### Quick Start
 
 ```bash
-# Clone
-git clone https://github.com/AliceFontanesi/cnn.git
-cd cnn
+# 1) prepara i dati AI4MARS in locale
+python3 segformer_lidar_fusion/scripts/prepare_ai4mars_hf.py \
+  --out data/ai4mars_partial \
+  --max-examples 100 \
+  --generate-dummy-lidar \
+  --mapping "0:0,1:1,2:2,3:2,4:2,5:1,6:0"
 
-# Install (Python ≥ 3.10)
-pip install -e ".[train,deploy,dev]"
+# 2) addestra il modello 3-class
+python3 -m segformer_lidar_fusion.scripts.train --config segformer_lidar_fusion/configs/erc_config_3class.yaml
+
+# 3) valuta il checkpoint migliore
+python3 -m segformer_lidar_fusion.scripts.evaluate \
+  --config segformer_lidar_fusion/configs/erc_config_3class.yaml \
+  --checkpoint checkpoints/erc_3class/best.pth \
+  --split val
+
+# 4) inferisci e salva un overlay
+python3 segformer_lidar_fusion/scripts/infer.py \
+  --checkpoint checkpoints/erc_3class/best.pth \
+  --image data/ai4mars_partial/val/images/frame_00003.png \
+  --lidar data/ai4mars_partial/val/lidar/frame_00003.npy \
+  --output out.png \
+  --config segformer_lidar_fusion/configs/erc_config_3class.yaml \
+  --num-classes 3
 ```
 
-## Dataset Structure
+### Schema del workflow
 
 ```
-data/train/          # (or val/ or test/)
-├── images/          # RGB frames (*.png, *.jpg)
-├── lidar/           # Height+intensity maps (*.npy, shape [2, H, W])
-└── masks/           # Label masks (*.png, uint8 class IDs)
+AI4MARS HF -> prepare_ai4mars_hf.py -> data/local_dataset/
+           -> train.py -> checkpoints/best.pth
+           -> evaluate.py -> mIoU / per-class IoU
+           -> diagnose.py -> worst-k visualizations
+           -> infer.py -> result overlay.png
 ```
 
-File stems must match across subdirectories (e.g. `frame_0001.png`, `frame_0001.npy`).
-
-## Training
+### 1) Preparare il dataset AI4MARS
 
 ```bash
-python -m segformer_lidar_fusion.scripts.train --config segformer_lidar_fusion/configs/erc_config.yaml
+python3 segformer_lidar_fusion/scripts/prepare_ai4mars_hf.py \
+  --out data/ai4mars_partial \
+  --max-examples 100 \
+  --generate-dummy-lidar \
+  --mapping "0:0,1:1,2:2,3:2,4:2,5:1,6:0"
 ```
 
-Key hyperparameters are in `configs/erc_config.yaml`:
-- AdamW optimiser (lr=6e-5, weight_decay=0.01)
-- Polynomial LR schedule with 5-epoch warmup
-- Mixed precision (AMP)
-- Class-weighted cross-entropy
+- `--out` crea la struttura dati locale.
+- `--max-examples` è utile per prototipi rapidi.
+- `--generate-dummy-lidar` produce file LiDAR placeholder quando non sono disponibili dati reali.
+- `--mapping` converte le etichette originali in 3 classi.
 
-## Evaluation
+Per esportare l’intero dataset senza limite:
 
 ```bash
-python -m segformer_lidar_fusion.scripts.evaluate \
-    --config segformer_lidar_fusion/configs/erc_config.yaml \
-    --checkpoint checkpoints/best.pth \
-    --split val
+python3 segformer_lidar_fusion/scripts/prepare_ai4mars_hf.py \
+  --out data/ai4mars_hf_full \
+  --generate-dummy-lidar \
+  --mapping "0:0,1:1,2:2,3:2,4:2,5:1,6:0"
 ```
 
-## Single-Image Inference
+### 2) Addestramento
 
 ```bash
-python -m segformer_lidar_fusion.scripts.infer \
-    --checkpoint checkpoints/best.pth \
-    --image test.png \
-    --lidar test.npy \
-    --output result.png
+python3 -m segformer_lidar_fusion.scripts.train --config segformer_lidar_fusion/configs/erc_config_3class.yaml
 ```
 
-## Deployment on Jetson Orin Nano
+Il training utilizza:
+- `AdamW`
+- schedulazione polinomiale del learning rate
+- warmup nei primissimi step
+- mixed precision se disponibile
+- checkpoint `best.pth` e salvataggi periodici ogni 10 epoche
 
-### 1. Export to ONNX
+### 3) Valutazione
 
 ```bash
-python -m segformer_lidar_fusion.deploy.export_onnx \
-    --checkpoint checkpoints/best.pth \
-    --output deploy/model.onnx
+python3 -m segformer_lidar_fusion.scripts.evaluate \
+  --config segformer_lidar_fusion/configs/erc_config_3class.yaml \
+  --checkpoint checkpoints/erc_3class/best.pth \
+  --split val
 ```
 
-### 2. Build TensorRT Engine (INT8)
+### 4) Diagnostica dei casi peggiori
 
 ```bash
-python -m segformer_lidar_fusion.deploy.tensorrt_engine \
-    --onnx deploy/model.onnx \
-    --output deploy/model.engine \
-    --precision int8 \
-    --calib-dir data/calibration
+python3 segformer_lidar_fusion/scripts/diagnose.py \
+  --config segformer_lidar_fusion/configs/erc_config_3class.yaml \
+  --checkpoint checkpoints/erc_3class/best.pth \
+  --output-dir data/erc_3class/diagnosis \
+  --topk 5
 ```
 
-### 3. ROS 2 Node
+Salva immagini comparando:
+- immagine originale,
+- predizione overlay,
+- ground truth overlay.
+
+### 5) Inferenza singola immagine
 
 ```bash
-ros2 launch segformer_lidar_fusion segmentation.launch.py \
-    engine_path:=deploy/model.engine
+python3 segformer_lidar_fusion/scripts/infer.py \
+  --checkpoint checkpoints/erc_3class/best.pth \
+  --image data/ai4mars_partial/val/images/frame_00003.png \
+  --lidar data/ai4mars_partial/val/lidar/frame_00003.npy \
+  --output out.png \
+  --config segformer_lidar_fusion/configs/erc_config_3class.yaml \
+  --num-classes 3
 ```
 
-**Topics:**
-| Direction | Topic | Type |
-|---|---|---|
-| Subscribe | `/rover/camera/image_raw` | `sensor_msgs/Image` |
-| Subscribe | `/rover/lidar/points` | `sensor_msgs/PointCloud2` |
-| Publish | `/rover/segmentation/costmap` | `sensor_msgs/Image` |
+`infer.py` applica normalizzazione, esegue la rete e salva un overlay RGB con legenda.
 
-## Project Structure
+---
+
+## 📦 Struttura dei dati richiesta
 
 ```
-segformer_lidar_fusion/
-├── configs/erc_config.yaml          # Hyperparameters & class definitions
-├── models/
-│   ├── mit.py                       # MiT-B0 encoder
-│   ├── lidar_encoder.py             # LiDAR conv encoder
-│   ├── fusion.py                    # Cross-attention fusion
-│   ├── segformer_head.py            # All-MLP decoder
-│   └── segformer_lidar.py           # Complete fused model
-├── data/erc_dataset.py              # Dataset loader
-├── deploy/
-│   ├── export_onnx.py               # ONNX export
-│   └── tensorrt_engine.py           # TensorRT INT8 builder
-├── ros2/
-│   ├── segmentation_node.py         # ROS 2 inference node
-│   └── launch/segmentation.launch.py
-├── scripts/
-│   ├── train.py                     # Training
-│   ├── evaluate.py                  # Evaluation (mIoU)
-│   └── infer.py                     # Single-image inference
-└── utils/
-    ├── metrics.py                   # mIoU computation
-    └── visualization.py             # Overlay & colourisation
+data/<split>/
+├── images/    # RGB frames (*.png, *.jpg)
+├── lidar/     # .npy files shape [2,H,W]
+└── masks/     # .png uint8 class ids
 ```
 
-## Hardware Target
+- I file devono avere lo stesso stem tra `images/`, `lidar/` e `masks/`.
+- Il dataset configurato usa `train`, `val` e `test`.
+- Il valore `255` è riservato a `ignore_index` e non viene valutato.
 
-| Spec | Value |
-|---|---|
-| Platform | NVIDIA Jetson Orin Nano 8 GB |
-| JetPack | 6.0 |
-| CUDA | 12.2 |
-| TensorRT | 8.6 |
-| Precision | INT8 (with FP16 fallback) |
-| Target FPS | ≥ 30 Hz @ 512×512 |
+---
 
-## License
+## 🔧 Dettagli tecnici utili
+
+- Il dataset usa `torch.nn.functional.interpolate` per resize immagini, LiDAR e maschere.
+- Le maschere vengono ridimensionate con interpolazione `nearest` per preservare gli id di classe.
+- Le immagini RGB sono normalizzate con mean/std standard ImageNet.
+- Il LiDAR è normalizzato con media 0 e deviazione 1 di default.
+- Il modello attuale aspetta input LiDAR con shape `(2, H, W)`:
+  - canale 0 = height,
+  - canale 1 = intensity.
+
+---
+
+## 📌 Limiti e note
+
+- La pipeline attuale funziona come prototipo; la parte LiDAR reale va verificata su dati reali.
+- `--generate-dummy-lidar` è utile per debugging ma non sostituisce dati reali di profondità.
+- Il remapping 7→3 è applicato nello script di preparazione, quindi il training e l’inferenza usano solamente la tassonomia ridotta.
+- È consigliato valutare l’equilibrio delle classi e aggiornare `training.class_weights` se `bedrock` o `background` risultano troppo sbilanciati.
+
+---
+
+## ✅ Cosa è già presente nel repository
+
+- Export AI4MARS a formato locale compatibile con PyTorch.
+- Training 3-class con SegFormer+B0 + fusione LiDAR.
+- Inferenza visuale con overlay e legenda.
+- Valutazione IoU e diagnostica dei casi peggiori.
+
+---
+
+## 📝 License
 
 MIT
